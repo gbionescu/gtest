@@ -1,8 +1,9 @@
 import asyncio
-import log
+import gtest.log as log
 import sys
 
-log = log.log("task.log")
+log = log.log("task")
+
 
 class TaskDep():
     object_needs = {}
@@ -62,6 +63,34 @@ class TaskDep():
         return len(TaskDep.test_object) == 0
 
 
+class Report():
+    _finished = []
+    _GREEN = "\033[0;32m"
+    _RED = "\033[1;31m"
+    _RESET = "\033[0;0m"
+    @staticmethod
+    def add_finished(task):
+        Report._finished.append(task)
+
+    @staticmethod
+    def print_report():
+        print("\n\t### Report")
+
+        total_pased = 0
+        for task in Report._finished:
+            if task.get_process().exitcode != 0:
+                print("\t%sFAILED%s - %s" %
+                      (Report._RED, Report._RESET, str(task)))
+            else:
+                total_pased += 1
+                print("\t%sPASSED%s - %s" %
+                      (Report._GREEN, Report._RESET, str(task)))
+
+        print("\n\t### Totals:")
+        print("\t-> Passed: %d" % total_pased)
+        print("\t-> Failed: %d" % (len(Report._finished) - total_pased))
+
+
 class TaskRunner():
     tasks = []
     pool_size = sys.maxsize
@@ -82,41 +111,53 @@ class TaskRunner():
 
     @staticmethod
     def can_run_in_pool(req_concur):
-        # log.debug(
-        #     "Check run req %s avail %s" % (
-        #         req_concur if type(req_concur) == int else 0,
-        #         TaskRunner.pool_size if TaskRunner.pool_size != sys.maxsize else "MAX"))
 
-        if req_concur and req_concur < len(TaskRunner.tasks):
+        # Check if the required concurrency can be achieved
+        if req_concur and req_concur <= len(TaskRunner.tasks):
             return False
 
         # Check if there is room in the pool
-        if TaskRunner.pool_size - len(TaskRunner.tasks) - 1 <= 0:
+        if TaskRunner.pool_size - len(TaskRunner.tasks) - 1 < 0:
             return False
 
+        log.debug(
+            "OK run req %s avail %s" % (
+                req_concur if type(req_concur) == int else 0,
+                TaskRunner.pool_size if TaskRunner.pool_size != sys.maxsize else "MAX"))
         return True
 
     @staticmethod
     async def monitor_tasks():
-        while True:
+        """
+        Monitor all running tasks
+        """
+        while not TaskRunner.finished:
+            # Check each task
+            something_died = False
             for task in list(TaskRunner.tasks):
                 if task.is_proc_alive():
                     continue
 
+                # If it's not alive anymore, mark its
+                # providing dependencies as solved
                 for prov in task.provides:
                     TaskDep.mark_dependency_solved(prov)
 
                 log.debug("%s exited" % str(task))
-                TaskRunner.tasks.remove(task)
+                TaskRunner.rem_running_task(task)
 
-            min_concurrency = sys.maxsize
-            for task in list(TaskRunner.tasks):
-                if task.max_concurrency:
-                    min_concurrency = \
-                        min(min_concurrency, task.max_concurrency)
+                something_died = True
 
-            if min_concurrency != TaskRunner.pool_size:
-                TaskRunner.set_pool_size(min_concurrency, force=True)
+            if something_died:
+                # Calculate new concurrency
+                min_concurrency = sys.maxsize
+                for task in list(TaskRunner.tasks):
+                    if task.max_concurrency:
+                        min_concurrency = \
+                            min(min_concurrency, task.max_concurrency)
+
+                if min_concurrency != TaskRunner.pool_size:
+                    TaskRunner.set_pool_size(min_concurrency, force=True)
 
             # Exit if there are no other tasks and the queue is empty
             if TaskRunner.finished:
@@ -125,17 +166,50 @@ class TaskRunner():
             await asyncio.sleep(0.1)
 
     @staticmethod
-    async def run_task(task):
-        log.debug("Starting %s" % str(task))
-
-        TaskRunner.set_pool_size(task.max_concurrency)
-        task.start_process()
+    def add_running_task(task):
+        """
+        Add task to running list
+        """
         TaskRunner.tasks.append(task)
+        log.debug(TaskRunner.tasks)
 
     @staticmethod
-    async def get_runnable_task():
+    def rem_running_task(task):
+        """
+        Remove task from running list
+        """
+        TaskRunner.tasks.remove(task)
+        log.debug(TaskRunner.tasks)
+
+        Report.add_finished(task)
+
+    @staticmethod
+    async def run_task(task):
+        """
+        Start a task
+        """
+        log.debug("Starting %s" % str(task))
+
+        # Set pool size to the tasks maximum pool size
+        TaskRunner.set_pool_size(task.max_concurrency)
+
+        # Start the process
+        task.start_process()
+
+        # Add running task to the list
+        TaskRunner.add_running_task(task)
+
+    @staticmethod
+    async def sched_runnable_task():
+        """
+        Schedule a runnable task
+        """
         to_run = []
-        while not TaskDep.finished() or len(to_run) > 0:
+
+        # Keep running while there are dependencies or tasks to run
+        while not TaskDep.finished() \
+                or len(to_run) > 0 \
+                or len(TaskRunner.tasks) > 0:
             for obj in TaskDep.to_test():
                 # If object has no needs
                 if obj.has_needs_satisfied():
@@ -148,9 +222,10 @@ class TaskRunner():
                 # Check if max_concurrency condition is achieved
                 if TaskRunner.can_run_in_pool(runnable.max_concurrency):
                     to_run.remove(runnable)
+                    # Run it
                     await TaskRunner.run_task(runnable)
 
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.1)
 
         TaskRunner.finished = True
 
@@ -163,6 +238,8 @@ def run_tasks():
 
     loop.run_until_complete(
         asyncio.gather(
-            TaskRunner.get_runnable_task(),
+            TaskRunner.sched_runnable_task(),
             TaskRunner.monitor_tasks())
-        )
+    )
+
+    Report.print_report()

@@ -1,8 +1,9 @@
 import inspect
 import enum
-import log
+import gtest.log as log
+import os
 
-from task import TaskDep
+from gtest.task import TaskDep
 from multiprocessing import Process
 
 log = log.log("hook.log")
@@ -16,7 +17,7 @@ class GTestType(enum.Enum):
 class GTestObject():
     def __init__(self, func, objtype, kwargs, path):
         self._func = func
-        self._path = path
+        self._path = path.replace(os.getcwd() + "/", "")
 
         log.debug("Adding func %s" % str(func))
 
